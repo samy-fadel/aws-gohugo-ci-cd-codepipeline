@@ -22,7 +22,12 @@ Parameters:
   RepositoryName:
     Description: CodeCommit repository name
     Type: String
-    Default: myrepo
+    Default: your repo
+  HostingBucketName:
+    Description: target bucket name hosting your website
+    Type: String
+    Default: your bucket name
+
 Resources:
   CodePipelineArtifactStoreBucket:
     Type: 'AWS::S3::Bucket'
@@ -131,7 +136,6 @@ Resources:
           Id: codepipeline-GoHugoPipeline
   
   
-
   BuildProjectRole:
     Type: AWS::IAM::Role
     Properties:
@@ -147,7 +151,6 @@ Resources:
             Action:
               - sts:AssumeRole
       Path: /
-  
   
   
   BuildProjectPolicy:
@@ -222,13 +225,7 @@ Resources:
       Tags:
         - Key: Name
           Value: !Ref ProjectName  
-  
-  
-  
-
-  
-
-  
+    
   GoHugoPipeline:
     Type: 'AWS::CodePipeline::Pipeline'
     Properties:
@@ -278,7 +275,7 @@ Resources:
                 Version: 1
                 Provider: S3
               Configuration:
-                BucketName: peakycroquefadel
+                BucketName: !Ref HostingBucketName
                 Extract: true
               InputArtifacts:
                 - Name: BuildOutput
