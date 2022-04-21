@@ -1,0 +1,363 @@
+# Copyright 2010-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# This file is licensed under the Apache License, Version 2.0 (the "License").
+# You may not use this file except in compliance with the License. A copy of
+# the License is located at
+#
+# http://aws.amazon.com/apache2.0/
+#
+# This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+# CONDITIONS OF ANY KIND, either express or implied. See the License for the
+# specific language governing permissions and limitations under the License.
+
+
+Parameters:
+  ProjectName:
+    Description: Name of the Project
+    Type: String
+  BranchName:
+    Description: CodeCommit branch name
+    Type: String
+    Default: main
+  RepositoryName:
+    Description: CodeCommit repository name
+    Type: String
+    Default: myrepo
+Resources:
+  CodePipelineArtifactStoreBucket:
+    Type: 'AWS::S3::Bucket'
+  
+  CodePipelineArtifactStoreBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref CodePipelineArtifactStoreBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: DenyUnEncryptedObjectUploads
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource: !Join 
+              - ''
+              - - !GetAtt 
+                  - CodePipelineArtifactStoreBucket
+                  - Arn
+                - /*
+            Condition:
+              StringNotEquals:
+                's3:x-amz-server-side-encryption': 'aws:kms'
+          - Sid: DenyInsecureConnections
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource: !Join 
+              - ''
+              - - !GetAtt 
+                  - CodePipelineArtifactStoreBucket
+                  - Arn
+                - /*
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+  
+  
+  AmazonCloudWatchEventRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: cwe-pipeline-execution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 'codepipeline:StartPipelineExecution'
+                Resource: !Join 
+                  - ''
+                  - - 'arn:aws:codepipeline:'
+                    - !Ref 'AWS::Region'
+                    - ':'
+                    - !Ref 'AWS::AccountId'
+                    - ':'
+                    - !Ref GoHugoPipeline
+  
+  
+  AmazonCloudWatchEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - CodeCommit Repository State Change
+        resources:
+          - !Join 
+            - ''
+            - - 'arn:aws:codecommit:'
+              - !Ref 'AWS::Region'
+              - ':'
+              - !Ref 'AWS::AccountId'
+              - ':'
+              - !Ref RepositoryName
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - main
+      Targets:
+        - Arn: !Join 
+            - ''
+            - - 'arn:aws:codepipeline:'
+              - !Ref 'AWS::Region'
+              - ':'
+              - !Ref 'AWS::AccountId'
+              - ':'
+              - !Ref GoHugoPipeline
+          RoleArn: !GetAtt 
+            - AmazonCloudWatchEventRole
+            - Arn
+          Id: codepipeline-GoHugoPipeline
+  
+  
+
+  BuildProjectRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-CodeBuildRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+  
+  
+  
+  BuildProjectPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ${ProjectName}-CodeBuildPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetBucketPolicy
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+             - !Join ['',['arn:aws:s3:::',!Ref CodePipelineArtifactStoreBucket, '/*']]
+             - !Join ['',['arn:aws:s3:::',!Ref CodePipelineArtifactStoreBucket]]
+          -
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: arn:aws:logs:*:*:*
+      Roles:
+        -
+          !Ref BuildProjectRole
+  
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref ProjectName
+      Description: !Ref ProjectName
+      ServiceRole: !GetAtt BuildProjectRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: linuxContainer
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:2.0
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                python: 3.8
+              commands:
+                - yum -y update
+                - echo Installing hugo
+                - curl -L -o hugo.deb https://github.com/gohugoio/hugo/releases/download/v0.70.0/hugo_0.70.0_Linux-64bit.deb
+                - dpkg -i hugo.deb
+            pre_build:
+              commands:
+                - echo In pre_build phase..
+                - echo Current directory is $CODEBUILD_SRC_DIR
+                - ls -la
+            build:
+              commands:
+                - hugo -v
+                - hugo --minify
+                - ls
+          artifacts:
+            files:
+              - '**/*'
+            base-directory: public
+
+      TimeoutInMinutes: 10
+      Tags:
+        - Key: Name
+          Value: !Ref ProjectName  
+  
+  
+  
+
+  
+
+  
+  GoHugoPipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      Name: GoHugo-pipeline
+      RoleArn: !GetAtt 
+        - CodePipelineServiceRole
+        - Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                BranchName: !Ref BranchName
+                RepositoryName: !Ref RepositoryName
+                PollForSourceChanges: false
+              RunOrder: 1
+
+        - Name: GoHugoBuild
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref BuildProject
+              RunOrder: 1
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+    
+        - Name: DeployToProduction
+          Actions:
+            - Name: DeployToProd
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: S3
+              Configuration:
+                BucketName: peakycroquefadel
+                Extract: true
+              InputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+              #RoleArn: !Sub arn:aws:iam::${ProductionAccount}:role/ToolsAcctCodePipelineCloudFormationRole    
+
+      ArtifactStore:
+        Type: S3
+        Location: !Ref CodePipelineArtifactStoreBucket
+  CodePipelineServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: AWS-CodePipeline-Service-3
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'codecommit:CancelUploadArchive'
+                  - 'codecommit:GetBranch'
+                  - 'codecommit:GetCommit'
+                  - 'codecommit:GetUploadArchiveStatus'
+                  - 'codecommit:UploadArchive'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'codedeploy:CreateDeployment'
+                  - 'codedeploy:GetApplicationRevision'
+                  - 'codedeploy:GetDeployment'
+                  - 'codedeploy:GetDeploymentConfig'
+                  - 'codedeploy:RegisterApplicationRevision'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'codebuild:BatchGetBuilds'
+                  - 'codebuild:StartBuild'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'devicefarm:ListProjects'
+                  - 'devicefarm:ListDevicePools'
+                  - 'devicefarm:GetRun'
+                  - 'devicefarm:GetUpload'
+                  - 'devicefarm:CreateUpload'
+                  - 'devicefarm:ScheduleRun'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                  - 'lambda:ListFunctions'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'iam:PassRole'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'elasticbeanstalk:*'
+                  - 'ec2:*'
+                  - 'elasticloadbalancing:*'
+                  - 'autoscaling:*'
+                  - 'cloudwatch:*'
+                  - 's3:*'
+                  - 'sns:*'
+                  - 'cloudformation:*'
+                  - 'rds:*'
+                  - 'sqs:*'
+                  - 'ecs:*'
+                Resource: '*'
+
+
+
